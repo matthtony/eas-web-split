@@ -1,0 +1,1 @@
+{"version":1,"model":"text-embedding-3-small","chunkSize":2000,"chunkOverlap":200,"sourceFiles":[{"name":"knowledge.pdf","size":52531320,"mtimeMs":1753956450000}],"totalChunks":437,"shards":[{"file":"kb_shard_0001.json","chunkStart":0,"chunkEnd":437}]}

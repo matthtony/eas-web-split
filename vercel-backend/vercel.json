@@ -1,0 +1,24 @@
+{
+  "regions": ["iad1"],
+  "rewrites": [
+    { "source": "/chat", "destination": "/api/chat" },
+    { "source": "/chat-stream", "destination": "/api/chat-stream" }
+  ],
+  "functions": {
+    "api/chat.js": {
+      "includeFiles": "api/kb_cache.json",
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/chat-stream.js": {
+      "includeFiles": "api/kb_cache.json",
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/debug-openai.js": {
+      "maxDuration": 10,
+      "memory": 256
+    }
+  }
+}
+

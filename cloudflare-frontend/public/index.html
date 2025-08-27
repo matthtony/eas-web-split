@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chatbot</title>
+    <style>
+      :root {
+        --primary: #6c5ce7;
+        --background: #f5f5f5;
+        --message-user: #dfe6e9;
+        --message-bot: #a29bfe;
+      }
+      body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: var(--background); display: flex; flex-direction: column; height: 100vh; }
+      #chat-container { flex: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; }
+      .message { max-width: 70%; margin-bottom: 1rem; padding: 0.8rem 1rem; border-radius: 10px; line-height: 1.4; }
+      .user { background: var(--message-user); align-self: flex-end; }
+      .bot { background: var(--message-bot); align-self: flex-start; color: #fff; }
+      #input-container { display: flex; padding: 1rem; background: #fff; border-top: 1px solid #ddd; }
+      #user-input { flex: 1; padding: 0.8rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 5px; }
+      #send-btn { margin-left: 0.5rem; padding: 0.8rem 1.2rem; background: var(--primary); color: #fff; border: none; border-radius: 5px; cursor: pointer; }
+      #send-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    </style>
+  </head>
+  <body>
+    <div id="chat-container"></div>
+    <div id="input-container">
+      <input type="text" id="user-input" placeholder="Type your message..." autocomplete="off" />
+      <button id="send-btn">Send</button>
+    </div>
+    <script>
+      const chatContainer = document.getElementById("chat-container");
+      const userInput = document.getElementById("user-input");
+      const sendBtn = document.getElementById("send-btn");
+      function addMessage(content, type) {
+        const msgEl = document.createElement("div");
+        msgEl.classList.add("message", type);
+        msgEl.innerText = content;
+        chatContainer.appendChild(msgEl);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      }
+      async function sendMessage() {
+        const text = userInput.value.trim();
+        if (!text) return;
+        addMessage(text, "user");
+        userInput.value = "";
+        sendBtn.disabled = true;
+        try {
+          const res = await fetch("/api/chat-stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
+          if (res.ok && res.body) {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let botMsg = "";
+            const msgEl = document.createElement("div");
+            msgEl.classList.add("message", "bot");
+            chatContainer.appendChild(msgEl);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+
+              let boundary = buffer.indexOf("\n\n");
+              while (boundary !== -1) {
+                const chunk = buffer.slice(0, boundary).trim();
+                buffer = buffer.slice(boundary + 2);
+                if (chunk.startsWith("data:")) {
+                  const payload = chunk.replace(/^data:\s*/, "");
+                  if (payload !== "[DONE]") {
+                    try {
+                      const json = JSON.parse(payload);
+                      const delta = json?.choices?.[0]?.delta?.content || "";
+                      if (delta) {
+                        botMsg += delta;
+                        msgEl.innerText = botMsg;
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                      }
+                    } catch (_) {
+                      // ignore non-JSON data frames
+                    }
+                  }
+                }
+                boundary = buffer.indexOf("\n\n");
+              }
+            }
+          } else {
+            const res2 = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
+            const data = await res2.json();
+            if (data.reply) {
+              addMessage(data.reply.trim(), "bot");
+            } else {
+              const detail = data?.error ? `${data.error}${data.detail ? " - " + data.detail : ""}` : "no reply";
+              addMessage(`Error: ${detail}`, "bot");
+            }
+          }
+        } catch (err) {
+          console.error(err);
+          addMessage("Failed to reach server.", "bot");
+        }
+        sendBtn.disabled = false;
+      }
+      sendBtn.addEventListener("click", sendMessage);
+      userInput.addEventListener("keydown", (e) => { if (e.key === "Enter") sendMessage(); });
+    </script>
+  </body>
+</html>
+
+
+
