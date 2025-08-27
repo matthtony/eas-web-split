@@ -106,9 +106,8 @@ async function main() {
       kbChunks.push(chunk);
       kbChunkSources.push(source);
       const resp = await openai.embeddings.create({ model: "text-embedding-3-small", input: chunk });
-      // Quantize to 3 decimals to reduce JSON size significantly
-      const emb = resp.data[0].embedding.map((v) => Math.round(v * 1000) / 1000);
-      kbEmbeddings.push(emb);
+      // Store full-precision embeddings for maximum accuracy (larger kb_cache.json)
+      kbEmbeddings.push(resp.data[0].embedding);
     }
   }
 

@@ -13,6 +13,10 @@ const pdfParse = require("pdf-parse");
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const OPENAI_BASE_URL = process.env.OPENAI_API_BASE || "https://api.openai.com/v1";
 const MAX_COMPLETION_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS) || undefined;
+const RETRIEVAL_K = Number(process.env.RETRIEVAL_K) || 8;
+const MMR_LAMBDA = Number(process.env.MMR_LAMBDA) || 0.7; // tradeoff relevance vs diversity
+const CONTEXT_CHAR_BUDGET = Number(process.env.CONTEXT_CHAR_BUDGET) || 120000; // ~30k tokens
+const SCORE_THRESHOLD = Number(process.env.SCORE_THRESHOLD) || 0.22;
 
 async function openaiPost(path, payload, options = {}) {
   const url = `${OPENAI_BASE_URL}${path}`;
@@ -101,6 +105,51 @@ function cosineSimilarity(a, b) {
     normB += b[i] * b[i];
   }
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+async function generateQueryVariants(message, n = 4) {
+  try {
+    const resp = await openaiPost("/chat/completions", {
+      model: "o4-mini",
+      messages: [
+        { role: "system", content: "Generate concise alternative phrasings of the user's question for retrieval. Return each variant on a new line. No numbering." },
+        { role: "user", content: message }
+      ],
+      max_completion_tokens: 256
+    }, { timeoutMs: 10000 });
+    const text = resp?.choices?.[0]?.message?.content || "";
+    const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+    const uniq = Array.from(new Set(lines)).slice(0, n);
+    return [message, ...uniq];
+  } catch {
+    return [message];
+  }
+}
+
+function mmrSelect(scoredIdxs, embeddings, k, lambda = MMR_LAMBDA) {
+  const selected = [];
+  const remaining = new Set(scoredIdxs.map(({ idx }) => idx));
+  // seed with best score
+  selected.push(scoredIdxs[0].idx);
+  remaining.delete(scoredIdxs[0].idx);
+  while (selected.length < k && remaining.size) {
+    let bestIdx = null;
+    let bestScore = -Infinity;
+    for (const idx of remaining) {
+      const relevance = scoredIdxs.find((s) => s.idx === idx)?.score ?? 0;
+      let diversity = 0;
+      for (const s of selected) {
+        const sim = cosineSimilarity(embeddings[idx], embeddings[s]);
+        if (sim > diversity) diversity = sim;
+      }
+      const mmr = lambda * relevance - (1 - lambda) * diversity;
+      if (mmr > bestScore) { bestScore = mmr; bestIdx = idx; }
+    }
+    if (bestIdx === null) break;
+    selected.push(bestIdx);
+    remaining.delete(bestIdx);
+  }
+  return selected;
 }
 
 function listSupportedFiles() {
@@ -298,32 +347,49 @@ export default async function handler(req, res) {
   try {
     await buildKnowledgeBase();
 
-    // Retrieve relevant context
+    // Multi-query retrieval; include as many chunks as fit the context budget
     let contextText = "";
+    let maxScoreObserved = -Infinity;
     if (kbEmbeddings.length) {
-      const queryEmbeddingResp = await openaiPost("/embeddings", {
-        model: "text-embedding-3-small",
-        input: message
+      const variants = await generateQueryVariants(message, 4);
+      const embResp = await Promise.all(variants.map((v) => openaiPost("/embeddings", { model: "text-embedding-3-small", input: v })));
+      const queryEmbeddings = embResp.map((r) => r?.data?.[0]?.embedding || []);
+      const scores = kbEmbeddings.map((emb, idx) => {
+        let best = -Infinity;
+        for (const q of queryEmbeddings) {
+          const s = cosineSimilarity(q, emb);
+          if (s > best) best = s;
+        }
+        return { idx, score: best };
       });
-      const queryEmbedding = queryEmbeddingResp?.data?.[0]?.embedding || [];
-      const scores = kbEmbeddings.map((emb, idx) => ({ idx, score: cosineSimilarity(queryEmbedding, emb) }));
-      const topIdxs = scores
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 3)
-        .map(({ idx }) => idx);
-      contextText = topIdxs
-        .map((idx) => `Source: ${kbChunkSources[idx]}\n${kbChunks[idx]}`)
-        .join("\n---\n");
+      scores.sort((a, b) => b.score - a.score);
+      if (scores.length) maxScoreObserved = scores[0].score;
+      let used = 0;
+      const parts = [];
+      for (const { idx } of scores) {
+        const piece = `Source: ${kbChunkSources[idx]}\n${kbChunks[idx]}`;
+        const extra = parts.length ? 5 : 0; // for separator length approx
+        if (used + piece.length + extra > CONTEXT_CHAR_BUDGET) break;
+        parts.push(piece);
+        used += piece.length + extra;
+      }
+      contextText = parts.join("\n---\n");
     }
 
+    const useInference = !contextText || maxScoreObserved < SCORE_THRESHOLD;
+    const systemStrict = contextText
+      ? `-Respond as complete and concise as possible, make sure the information given is accurate. \n-Do not answer questions outside of the knowledge files. \n-For each response, give source, reference, and page number at the end of each response for each information mentioned (reference to the documents within the documents because each file uploaded may contain multiple documents).\n-Crosscheck all of the information in the response with the reference. \n-Give the short conclusion first and follow with the explanation\n-Crosscheck and validate all responses strictly against the uploaded document sources before replying. Do not provide any response unless it can be fully supported with evidence from the documents.\n-If the sources state a numeric rule/ratio (e.g., '1 A requires 1 B'), USE that rule to compute implied quantities for the user’s asked amount using basic arithmetic. Show the calculation steps and cite the rule’s source. Do not invent rules.\n\n${contextText}`
+      : "You are a helpful assistant. Answer concisely.";
+    const systemInfer = contextText
+      ? `-When sources are insufficient to fully answer, provide the best-effort inferred answer using clear assumptions and basic arithmetic/logic.\n-Label it as 'Best-effort inference' and prefer any partial evidence available.\n-If a numeric rule/ratio exists, scale it to the asked quantity and show steps.\n-If later documents contradict assumptions, state that the document rule should prevail.\n\n${contextText}`
+      : "-No direct document evidence found. Provide a best-effort inferred answer using clear assumptions and basic arithmetic/logic. Keep it concise and label as 'Best-effort inference'. Ask for missing details if necessary.";
+
     const completionPayload = {
-      model: "o4-mini",
+      model: "o3",
       messages: [
         {
           role: "system",
-          content: contextText
-            ? `-Respond as complete and concise as possible, make sure the information given is accurate. \n-Do not answer questions outside of the knowledge files. \n-For each response, give source, reference, and page number at the end of each response for each information mentioned (reference to the documents within the documents because each file uploaded may contain multiple documents).\n-Crosscheck all of the information in the response with the reference. \n-Give the short conclusion first and follow with the explanation\n-Crosscheck and validate all responses strictly against the uploaded document sources before replying. Do not provide any response unless it can be fully supported with evidence from the documents.\n\n${contextText}`
-            : "You are a helpful assistant. Answer concisely."
+          content: useInference ? systemInfer : systemStrict
         },
         { role: "user", content: message }
       ]

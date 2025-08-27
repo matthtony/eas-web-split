@@ -38,6 +38,7 @@ async function openaiPost(path, payload, options = {}) {
 const CHUNK_SIZE = 2000;
 const MAX_COMPLETION_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS) || undefined;
 const CHUNK_OVERLAP = 200;
+const CONTEXT_CHAR_BUDGET = Number(process.env.CONTEXT_CHAR_BUDGET) || 120000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -241,30 +242,42 @@ export default async function handler(req, res) {
   try {
     await buildKnowledgeBase();
 
-    // Retrieve top-k context
+    // Retrieve as many chunks as fit the context budget
     let contextText = "";
     if (kbEmbeddings && kbEmbeddings.length) {
       const embResp = await openaiPost("/embeddings", { model: "text-embedding-3-small", input: message });
       const queryEmbedding = embResp?.data?.[0]?.embedding || [];
       const scores = kbEmbeddings.map((emb, idx) => ({ idx, score: cosineSimilarity(queryEmbedding, emb) }));
-      const topIdxs = scores.sort((a, b) => b.score - a.score).slice(0, 3).map(({ idx }) => idx);
-      contextText = topIdxs.map((idx) => `Source: ${kbChunkSources[idx]}\n${kbChunks[idx]}`).join("\n---\n");
+      scores.sort((a, b) => b.score - a.score);
+      let used = 0;
+      const parts = [];
+      for (const { idx } of scores) {
+        const piece = `Source: ${kbChunkSources[idx]}\n${kbChunks[idx]}`;
+        const extra = parts.length ? 5 : 0;
+        if (used + piece.length + extra > CONTEXT_CHAR_BUDGET) break;
+        parts.push(piece);
+        used += piece.length + extra;
+      }
+      contextText = parts.join("\n---\n");
     }
 
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
 
+    const useInference = !contextText;
+    const systemStrict = contextText
+      ? `-Respond as complete and concise as possible, make sure the information given is accurate. \n-Do not answer questions outside of the knowledge files. \n-For each response, give source, reference, and page number at the end of each response for each information mentioned (reference to the documents within the documents because each file uploaded may contain multiple documents).\n-Crosscheck all of the information in the response with the reference. \n-Give the short conclusion first and follow with the explanation\n-Crosscheck and validate all responses strictly against the uploaded document sources before replying. Do not provide any response unless it can be fully supported with evidence from the documents.\n-If the sources state a numeric rule/ratio (e.g., '1 A requires 1 B'), USE that rule to compute implied quantities for the user’s asked amount using basic arithmetic. Show the calculation steps and cite the rule’s source. Do not invent rules.\n\n${contextText}`
+      : "You are a helpful assistant. Answer concisely.";
+    const systemInfer = contextText
+      ? `-When sources are insufficient to fully answer, provide the best-effort inferred answer using clear assumptions and basic arithmetic/logic.\n-Label it as 'Best-effort inference' and prefer any partial evidence available.\n-If a numeric rule/ratio exists, scale it to the asked quantity and show steps.\n-If later documents contradict assumptions, state that the document rule should prevail.\n\n${contextText}`
+      : "-No direct document evidence found. Provide a best-effort inferred answer using clear assumptions and basic arithmetic/logic. Keep it concise and label as 'Best-effort inference'. Ask for missing details if necessary.";
+
     const payload = {
-      model: "o4-mini",
+      model: "o3",
       stream: true,
       messages: [
-        {
-          role: "system",
-          content: contextText
-            ? `-Respond as complete and concise as possible, make sure the information given is accurate. \n-Do not answer questions outside of the knowledge files. \n-For each response, give source, reference, and page number at the end of each response for each information mentioned (reference to the documents within the documents because each file uploaded may contain multiple documents).\n-Crosscheck all of the information in the response with the reference. \n-Give the short conclusion first and follow with the explanation\n-Crosscheck and validate all responses strictly against the uploaded document sources before replying. Do not provide any response unless it can be fully supported with evidence from the documents.\n\n${contextText}`
-            : "You are a helpful assistant. Answer concisely."
-        },
+        { role: "system", content: useInference ? systemInfer : systemStrict },
         { role: "user", content: message }
       ]
     };
