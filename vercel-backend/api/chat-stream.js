@@ -10,6 +10,50 @@ const pdfParse = require("pdf-parse");
 // Config
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const OPENAI_BASE_URL = process.env.OPENAI_API_BASE || "https://api.openai.com/v1";
+const DEFAULT_REASONING_MODEL = process.env.OPENAI_REASONING_MODEL || process.env.OPENAI_MODEL || "gpt-5-thinking";
+const REASONING_EFFORT = process.env.REASONING_EFFORT || "high"; // prioritize quality
+const TEMPERATURE = (process.env.TEMPERATURE ? Number(process.env.TEMPERATURE) : 0.2);
+const REASONING_CANDIDATES = (process.env.OPENAI_REASONING_CANDIDATES || "gpt-5-thinking,o4,o4-mini,o3")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+let SELECTED_REASONING_MODEL = null;
+const USE_RAW_KB = (process.env.USE_RAW_KB || "1") !== "0";
+
+async function openaiPostJson(path, payload, options = {}) {
+  const resp = await openaiPost(path, payload, options);
+  const text = await resp.text();
+  try { return JSON.parse(text); } catch { return {}; }
+}
+
+async function resolveReasoningModel() {
+  if (SELECTED_REASONING_MODEL) return SELECTED_REASONING_MODEL;
+  const uniqueCandidates = Array.from(new Set([DEFAULT_REASONING_MODEL, ...REASONING_CANDIDATES]));
+  for (const model of uniqueCandidates) {
+    try {
+      await openaiPost("/chat/completions", {
+        model,
+        messages: [
+          { role: "system", content: "ping" },
+          { role: "user", content: "ping" }
+        ],
+        temperature: 0,
+        max_completion_tokens: 1
+      }, { timeoutMs: 8000 });
+      SELECTED_REASONING_MODEL = model;
+      return SELECTED_REASONING_MODEL;
+    } catch (e) {
+      const msg = String(e?.message || e).toLowerCase();
+      const modelUnavailable = msg.includes("model_not_found") || msg.includes("does not exist") || msg.includes("not have access") || msg.includes(" 404");
+      if (!modelUnavailable) {
+        SELECTED_REASONING_MODEL = model;
+        return SELECTED_REASONING_MODEL;
+      }
+    }
+  }
+  SELECTED_REASONING_MODEL = "o3";
+  return SELECTED_REASONING_MODEL;
+}
 
 async function openaiPost(path, payload, options = {}) {
   const url = `${OPENAI_BASE_URL}${path}`;
@@ -35,10 +79,45 @@ async function openaiPost(path, payload, options = {}) {
     clearTimeout(to);
   }
 }
+
+async function postChatCompletionStream(payload, options = {}) {
+  let current = { ...(payload || {}) };
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await openaiPost("/chat/completions", current, options);
+    } catch (e) {
+      lastError = e;
+      const msg = String(e?.message || e).toLowerCase();
+      let modified = false;
+      const unknownReasoning = (msg.includes("unknown parameter") && msg.includes("reasoning")) || msg.includes('"param": "reasoning"');
+      if (unknownReasoning && current.reasoning) {
+        const { reasoning, ...rest } = current;
+        current = rest;
+        modified = true;
+      }
+      const tempUnsupported = msg.includes("unsupported value") && msg.includes("temperature");
+      const unknownTemp = (msg.includes("unknown parameter") && msg.includes("temperature")) || msg.includes('"param": "temperature"');
+      if ((tempUnsupported || unknownTemp) && typeof current.temperature !== "undefined") {
+        const { temperature, ...rest } = current;
+        current = rest;
+        modified = true;
+      }
+      const unknownMaxCompletion = (msg.includes("unknown parameter") && msg.includes("max_completion_tokens")) || msg.includes('"param": "max_completion_tokens"');
+      if (unknownMaxCompletion && typeof current.max_completion_tokens !== "undefined") {
+        const { max_completion_tokens, ...rest } = current;
+        current = { ...rest, max_tokens: max_completion_tokens };
+        modified = true;
+      }
+      if (!modified) throw e;
+    }
+  }
+  throw lastError;
+}
 const CHUNK_SIZE = 2000;
-const MAX_COMPLETION_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS) || undefined;
+const MAX_COMPLETION_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS) || 8192;
 const CHUNK_OVERLAP = 200;
-const CONTEXT_CHAR_BUDGET = Number(process.env.CONTEXT_CHAR_BUDGET) || 120000;
+const CONTEXT_CHAR_BUDGET = Number(process.env.CONTEXT_CHAR_BUDGET) || 240000;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -49,6 +128,13 @@ const KB_CACHE_FILE_CANDIDATES = [
   path.join(__dirname, "kb_cache.json"),
   path.join(__dirname, "data", "kb_cache.json"),
   path.join(__dirname, "..", "data", "kb_cache.json")
+];
+const RAW_KB_FILE_CANDIDATES = [
+  path.join(__dirname, "public", "data", "raw_kb.json"),
+  path.join(__dirname, "..", "public", "data", "raw_kb.json"),
+  path.join(__dirname, "raw_kb.json"),
+  path.join(__dirname, "data", "raw_kb.json"),
+  path.join(__dirname, "..", "data", "raw_kb.json")
 ];
 
 function pickExistingPath(candidates) {
@@ -157,6 +243,40 @@ async function tryLoadKbFromCache() {
   }
 }
 
+function tryLoadRawKb() {
+  try {
+    const p = pickExistingPath(RAW_KB_FILE_CANDIDATES);
+    if (!p) return null;
+    const raw = fs.readFileSync(p, "utf8");
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data?.files)) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function buildContextFromRaw(rawKb, budget = CONTEXT_CHAR_BUDGET) {
+  try {
+    const files = Array.isArray(rawKb?.files) ? rawKb.files : [];
+    const parts = [];
+    let used = 0;
+    for (const f of files) {
+      const source = f?.name || "unknown";
+      const text = String(f?.text || "");
+      if (!text) continue;
+      const piece = `Source: ${source}\n${text}`;
+      const extra = parts.length ? 5 : 0;
+      if (used + piece.length + extra > budget) break;
+      parts.push(piece);
+      used += piece.length + extra;
+    }
+    return parts.join("\n---\n");
+  } catch {
+    return "";
+  }
+}
+
 async function buildKnowledgeBase() {
   if (kbChunks && kbEmbeddings && kbChunkSources) return;
   if (await tryLoadKbFromCache()) return;
@@ -242,9 +362,18 @@ export default async function handler(req, res) {
   try {
     await buildKnowledgeBase();
 
-    // Retrieve as many chunks as fit the context budget
+    // Prefer RAW KB when available
     let contextText = "";
-    if (kbEmbeddings && kbEmbeddings.length) {
+    let usedRaw = false;
+    if (USE_RAW_KB) {
+      const rawKb = tryLoadRawKb();
+      if (rawKb) {
+        contextText = buildContextFromRaw(rawKb, CONTEXT_CHAR_BUDGET);
+        usedRaw = !!contextText;
+      }
+    }
+    // Fallback: embedding similarity
+    if (!usedRaw && kbEmbeddings && kbEmbeddings.length) {
       const embResp = await openaiPost("/embeddings", { model: "text-embedding-3-small", input: message });
       const queryEmbedding = embResp?.data?.[0]?.embedding || [];
       const scores = kbEmbeddings.map((emb, idx) => ({ idx, score: cosineSimilarity(queryEmbedding, emb) }));
@@ -274,26 +403,44 @@ export default async function handler(req, res) {
       : "-No direct document evidence found. Provide a best-effort inferred answer using clear assumptions and basic arithmetic/logic. Keep it concise and label as 'Best-effort inference'. Ask for missing details if necessary.";
 
     const payload = {
-      model: "o3",
+      model: await resolveReasoningModel(),
       stream: true,
       messages: [
         { role: "system", content: useInference ? systemInfer : systemStrict },
         { role: "user", content: message }
       ]
     };
+    if (REASONING_EFFORT) {
+      payload.reasoning = { effort: REASONING_EFFORT };
+    }
     if (MAX_COMPLETION_TOKENS) payload.max_completion_tokens = MAX_COMPLETION_TOKENS;
-    const resp = await openaiPost("/chat/completions", payload, { timeoutMs: 30000 });
+    payload.temperature = TEMPERATURE;
+    const resp = await postChatCompletionStream(payload, { timeoutMs: 120000 });
 
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
-    // Forward raw SSE bytes from OpenAI
+    // Forward raw SSE bytes from OpenAI, then append model suffix before [DONE]
     if (!resp.body) throw new Error("No stream body from OpenAI");
     const reader = resp.body.getReader();
+    let modelEmitted = false;
+    const encoder = new TextEncoder();
+    const modelUsed = (await resolveReasoningModel()) || "unknown-model";
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      const chunkStr = new TextDecoder().decode(value);
+      // Intercept the [DONE] sentinel to inject our model suffix
+      if (!modelEmitted && /\n\s*data:\s*\[DONE\]/.test(chunkStr)) {
+        const suffix = encoder.encode(`data: {"model":"${modelUsed}"}\n\n`);
+        res.write(suffix);
+        modelEmitted = true;
+      }
       res.write(value);
+    }
+    if (!modelEmitted) {
+      const suffix = encoder.encode(`data: {"model":"${modelUsed}"}\n\n`);
+      res.write(suffix);
     }
     res.end();
   } catch (error) {

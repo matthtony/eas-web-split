@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "precompute": "node -r dotenv/config scripts/precompute-kb.js",
+    "precompute:raw": "node -r dotenv/config scripts/precompute-raw.js",
     "pages:dev": "wrangler pages dev public --local --persist-to ./data_dev",
     "pages:deploy": "wrangler pages deploy public"
   },

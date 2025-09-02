@@ -1,8 +1,8 @@
-import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
+import crypto from "crypto";
 
 const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse");
@@ -19,10 +19,12 @@ const KB_CACHE_FILE = path.join(KB_CACHE_DIR, "kb_cache.json");
 const PUBLIC_DATA_DIR = path.join(PROJECT_ROOT, "public", "data");
 const PUBLIC_KB_CACHE_FILE = path.join(PUBLIC_DATA_DIR, "kb_cache.json");
 const PUBLIC_KB_INDEX_FILE = path.join(PUBLIC_DATA_DIR, "kb_index.json");
+const PUBLIC_RAW_KB_FILE = path.join(PUBLIC_DATA_DIR, "raw_kb.json");
 const SHARD_FILE_PREFIX = "kb_shard_";
 const MAX_CHUNKS_PER_SHARD = 500; // keep each shard well under Pages' 25 MiB limit
 // Also emit a colocated copy for the API function so Vercel bundles it next to the handler
 const API_FUNC_CACHE_FILE = path.join(PROJECT_ROOT, "api", "kb_cache.json");
+const API_FUNC_RAW_KB_FILE = path.join(PROJECT_ROOT, "api", "raw_kb.json");
 
 const CHUNK_SIZE = 2000; // larger chunks → fewer chunks → smaller JSON
 const CHUNK_OVERLAP = 200;
@@ -87,18 +89,24 @@ async function main() {
   const kbChunks = [];
   const kbEmbeddings = [];
   const kbChunkSources = [];
+  const rawFiles = [];
 
   for (const filePath of files) {
     const ext = path.extname(filePath).toLowerCase();
     const source = path.basename(filePath);
     let text = "";
 
+    const buf = fs.readFileSync(filePath);
+    const bytes_b64 = buf.toString("base64");
+    const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+    const size = buf.length;
     if (ext === ".pdf") {
-      const pdfBuffer = fs.readFileSync(filePath);
-      const parsed = await pdfParse(pdfBuffer);
+      const parsed = await pdfParse(buf);
       text = parsed.text || "";
+      rawFiles.push({ name: source, type: "pdf", size, sha256, bytes_b64, numPages: parsed?.numpages || null, text });
     } else {
       text = fs.readFileSync(filePath, "utf8");
+      rawFiles.push({ name: source, type: ext.slice(1), size, sha256, bytes_b64, text });
     }
 
     const chunks = chunkText(text);
@@ -128,6 +136,15 @@ async function main() {
   fs.writeFileSync(KB_CACHE_FILE, JSON.stringify(payload));
   console.log(`Wrote cache to ${KB_CACHE_FILE} with ${kbChunks.length} chunks.`);
 
+  // Also emit a raw KB containing full text for each file
+  const rawPayload = {
+    version: 1,
+    sourceFiles: getCurrentSourceFileInfo(files),
+    files: rawFiles
+  };
+  fs.writeFileSync(API_FUNC_RAW_KB_FILE, JSON.stringify(rawPayload));
+  console.log(`Wrote raw KB for function to ${API_FUNC_RAW_KB_FILE}.`);
+
   // Also emit sharded payload to public/data for Cloudflare Pages Functions static access
   try {
     if (!fs.existsSync(PUBLIC_DATA_DIR)) {
@@ -140,7 +157,8 @@ async function main() {
         if (
           name === path.basename(PUBLIC_KB_CACHE_FILE) ||
           name === path.basename(PUBLIC_KB_INDEX_FILE) ||
-          name.startsWith(SHARD_FILE_PREFIX)
+          name.startsWith(SHARD_FILE_PREFIX) ||
+          name === path.basename(PUBLIC_RAW_KB_FILE)
         ) {
           fs.unlinkSync(path.join(PUBLIC_DATA_DIR, name));
         }
@@ -179,6 +197,10 @@ async function main() {
     };
     fs.writeFileSync(PUBLIC_KB_INDEX_FILE, JSON.stringify(indexPayload));
     console.log(`Wrote shard index to ${PUBLIC_KB_INDEX_FILE} with ${shardsMeta.length} shard(s).`);
+
+    // Write raw KB to public for the frontend/diagnostics
+    fs.writeFileSync(PUBLIC_RAW_KB_FILE, JSON.stringify(rawPayload));
+    console.log(`Wrote raw KB to ${PUBLIC_RAW_KB_FILE}.`);
   } catch (e) {
     console.warn(`Failed to write sharded KB to public/data:`, e?.message || e);
   }

@@ -12,11 +12,52 @@ const pdfParse = require("pdf-parse");
 // -----------------------------------------------------------------------------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const OPENAI_BASE_URL = process.env.OPENAI_API_BASE || "https://api.openai.com/v1";
-const MAX_COMPLETION_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS) || undefined;
+const MAX_COMPLETION_TOKENS = Number(process.env.MAX_COMPLETION_TOKENS) || 8192;
 const RETRIEVAL_K = Number(process.env.RETRIEVAL_K) || 8;
 const MMR_LAMBDA = Number(process.env.MMR_LAMBDA) || 0.7; // tradeoff relevance vs diversity
-const CONTEXT_CHAR_BUDGET = Number(process.env.CONTEXT_CHAR_BUDGET) || 120000; // ~30k tokens
+const CONTEXT_CHAR_BUDGET = Number(process.env.CONTEXT_CHAR_BUDGET) || 240000; // larger context budget for best answers
 const SCORE_THRESHOLD = Number(process.env.SCORE_THRESHOLD) || 0.22;
+// Reasoning model configuration (defaults to GPT-5 thinking model if not set)
+const DEFAULT_REASONING_MODEL = process.env.OPENAI_REASONING_MODEL || process.env.OPENAI_MODEL || "gpt-5-thinking";
+const REASONING_EFFORT = process.env.REASONING_EFFORT || "high"; // prioritize quality
+const TEMPERATURE = (process.env.TEMPERATURE ? Number(process.env.TEMPERATURE) : 0.2);
+const REASONING_CANDIDATES = (process.env.OPENAI_REASONING_CANDIDATES || "gpt-5-thinking,o4,o4-mini,o3")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+let SELECTED_REASONING_MODEL = null;
+const USE_RAW_KB = (process.env.USE_RAW_KB || "1") !== "0"; // default to raw KB
+
+async function resolveReasoningModel() {
+  if (SELECTED_REASONING_MODEL) return SELECTED_REASONING_MODEL;
+  const uniqueCandidates = Array.from(new Set([DEFAULT_REASONING_MODEL, ...REASONING_CANDIDATES]));
+  for (const model of uniqueCandidates) {
+    try {
+      await openaiPost("/chat/completions", {
+        model,
+        messages: [
+          { role: "system", content: "ping" },
+          { role: "user", content: "ping" }
+        ],
+        temperature: 0,
+        max_completion_tokens: 1
+      }, { timeoutMs: 8000 });
+      SELECTED_REASONING_MODEL = model;
+      return SELECTED_REASONING_MODEL;
+    } catch (e) {
+      const msg = String(e?.message || e).toLowerCase();
+      const modelUnavailable = msg.includes("model_not_found") || msg.includes("does not exist") || msg.includes("not have access") || msg.includes(" 404");
+      if (!modelUnavailable) {
+        // Likely a transient error; optimistically select
+        SELECTED_REASONING_MODEL = model;
+        return SELECTED_REASONING_MODEL;
+      }
+      // Try next candidate
+    }
+  }
+  SELECTED_REASONING_MODEL = "o3";
+  return SELECTED_REASONING_MODEL;
+}
 
 async function openaiPost(path, payload, options = {}) {
   const url = `${OPENAI_BASE_URL}${path}`;
@@ -43,6 +84,49 @@ async function openaiPost(path, payload, options = {}) {
   }
 }
 
+async function postChatCompletion(payload, options = {}) {
+  let current = { ...(payload || {}) };
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await openaiPost("/chat/completions", current, options);
+    } catch (e) {
+      lastError = e;
+      const msg = String(e?.message || e).toLowerCase();
+      let modified = false;
+
+      // Remove unsupported/unknown reasoning param
+      const unknownReasoning = (msg.includes("unknown parameter") && msg.includes("reasoning")) || msg.includes('"param": "reasoning"');
+      if (unknownReasoning && current.reasoning) {
+        const { reasoning, ...rest } = current;
+        current = rest;
+        modified = true;
+      }
+
+      // Remove unsupported/unknown temperature param
+      const tempUnsupported = msg.includes("unsupported value") && msg.includes("temperature");
+      const unknownTemp = (msg.includes("unknown parameter") && msg.includes("temperature")) || msg.includes('"param": "temperature"');
+      if ((tempUnsupported || unknownTemp) && typeof current.temperature !== "undefined") {
+        const { temperature, ...rest } = current;
+        current = rest;
+        modified = true;
+      }
+
+      // Fallback max tokens param if needed
+      const unknownMaxCompletion = (msg.includes("unknown parameter") && msg.includes("max_completion_tokens")) || msg.includes('"param": "max_completion_tokens"');
+      if (unknownMaxCompletion && typeof current.max_completion_tokens !== "undefined") {
+        const { max_completion_tokens, ...rest } = current;
+        current = { ...rest, max_tokens: max_completion_tokens };
+        modified = true;
+      }
+
+      if (!modified) throw e;
+      // retry with modified payload
+    }
+  }
+  throw lastError;
+}
+
 const CHUNK_SIZE = 2000;
 const CHUNK_OVERLAP = 200;
 const __filename = fileURLToPath(import.meta.url);
@@ -62,6 +146,14 @@ const KB_CACHE_FILE_CANDIDATES = [
   // Fallbacks for both function-root and project-root layouts
   path.join(__dirname, "data", "kb_cache.json"),
   path.join(__dirname, "..", "data", "kb_cache.json")
+];
+const RAW_KB_FILE_CANDIDATES = [
+  // Prefer public data file when present
+  path.join(__dirname, "public", "data", "raw_kb.json"),
+  path.join(__dirname, "..", "public", "data", "raw_kb.json"),
+  path.join(__dirname, "raw_kb.json"),
+  path.join(__dirname, "data", "raw_kb.json"),
+  path.join(__dirname, "..", "data", "raw_kb.json")
 ];
 function pickExistingPath(candidates) {
   for (const p of candidates) {
@@ -109,14 +201,16 @@ function cosineSimilarity(a, b) {
 
 async function generateQueryVariants(message, n = 4) {
   try {
-    const resp = await openaiPost("/chat/completions", {
-      model: "o4-mini",
+    const resp = await postChatCompletion({
+      model: await resolveReasoningModel(),
       messages: [
         { role: "system", content: "Generate concise alternative phrasings of the user's question for retrieval. Return each variant on a new line. No numbering." },
         { role: "user", content: message }
       ],
-      max_completion_tokens: 256
-    }, { timeoutMs: 10000 });
+      temperature: TEMPERATURE,
+      max_completion_tokens: 256,
+      ...(REASONING_EFFORT ? { reasoning: { effort: REASONING_EFFORT } } : {})
+    }, { timeoutMs: 60000 });
     const text = resp?.choices?.[0]?.message?.content || "";
     const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
     const uniq = Array.from(new Set(lines)).slice(0, n);
@@ -246,6 +340,40 @@ function saveKbToCache(sourceFilesInfo) {
   }
 }
 
+function tryLoadRawKb() {
+  try {
+    const p = pickExistingPath(RAW_KB_FILE_CANDIDATES);
+    if (!p) return null;
+    const raw = fs.readFileSync(p, "utf8");
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data?.files)) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function buildContextFromRaw(rawKb, budget = CONTEXT_CHAR_BUDGET) {
+  try {
+    const files = Array.isArray(rawKb?.files) ? rawKb.files : [];
+    const parts = [];
+    let used = 0;
+    for (const f of files) {
+      const source = f?.name || "unknown";
+      const text = String(f?.text || "");
+      if (!text) continue;
+      const piece = `Source: ${source}\n${text}`;
+      const extra = parts.length ? 5 : 0;
+      if (used + piece.length + extra > budget) break;
+      parts.push(piece);
+      used += piece.length + extra;
+    }
+    return parts.join("\n---\n");
+  } catch {
+    return "";
+  }
+}
+
 async function buildKnowledgeBase() {
   if (kbChunks && kbEmbeddings && kbChunkSources) return; // already built in this runtime
 
@@ -347,10 +475,19 @@ export default async function handler(req, res) {
   try {
     await buildKnowledgeBase();
 
-    // Multi-query retrieval; include as many chunks as fit the context budget
+    // Prefer RAW KB when available
     let contextText = "";
+    let usedRaw = false;
+    if (USE_RAW_KB) {
+      const rawKb = tryLoadRawKb();
+      if (rawKb) {
+        contextText = buildContextFromRaw(rawKb, CONTEXT_CHAR_BUDGET);
+        usedRaw = !!contextText;
+      }
+    }
+    // Fallback to embedding-based retrieval
     let maxScoreObserved = -Infinity;
-    if (kbEmbeddings.length) {
+    if (!usedRaw && kbEmbeddings.length) {
       const variants = await generateQueryVariants(message, 4);
       const embResp = await Promise.all(variants.map((v) => openaiPost("/embeddings", { model: "text-embedding-3-small", input: v })));
       const queryEmbeddings = embResp.map((r) => r?.data?.[0]?.embedding || []);
@@ -376,7 +513,7 @@ export default async function handler(req, res) {
       contextText = parts.join("\n---\n");
     }
 
-    const useInference = !contextText || maxScoreObserved < SCORE_THRESHOLD;
+    const useInference = !contextText || (!usedRaw && maxScoreObserved < SCORE_THRESHOLD);
     const systemStrict = contextText
       ? `-Respond as complete and concise as possible, make sure the information given is accurate. \n-Do not answer questions outside of the knowledge files. \n-For each response, give source, reference, and page number at the end of each response for each information mentioned (reference to the documents within the documents because each file uploaded may contain multiple documents).\n-Crosscheck all of the information in the response with the reference. \n-Give the short conclusion first and follow with the explanation\n-Crosscheck and validate all responses strictly against the uploaded document sources before replying. Do not provide any response unless it can be fully supported with evidence from the documents.\n-If the sources state a numeric rule/ratio (e.g., '1 A requires 1 B'), USE that rule to compute implied quantities for the user’s asked amount using basic arithmetic. Show the calculation steps and cite the rule’s source. Do not invent rules.\n\n${contextText}`
       : "You are a helpful assistant. Answer concisely.";
@@ -385,7 +522,7 @@ export default async function handler(req, res) {
       : "-No direct document evidence found. Provide a best-effort inferred answer using clear assumptions and basic arithmetic/logic. Keep it concise and label as 'Best-effort inference'. Ask for missing details if necessary.";
 
     const completionPayload = {
-      model: "o3",
+      model: await resolveReasoningModel(),
       messages: [
         {
           role: "system",
@@ -394,10 +531,19 @@ export default async function handler(req, res) {
         { role: "user", content: message }
       ]
     };
+    if (REASONING_EFFORT) {
+      completionPayload.reasoning = { effort: REASONING_EFFORT };
+    }
     if (MAX_COMPLETION_TOKENS) completionPayload.max_completion_tokens = MAX_COMPLETION_TOKENS;
-    const completion = await openaiPost("/chat/completions", completionPayload, { timeoutMs: 30000 });
-    const reply = completion?.choices?.[0]?.message?.content || "";
-    res.json({ reply });
+    // prioritize quality: low temp, high effort, longer timeout
+    completionPayload.temperature = TEMPERATURE;
+    const completion = await postChatCompletion(completionPayload, { timeoutMs: 120000 });
+    const modelUsed = completion?.model || completionPayload?.model || "unknown-model";
+    let reply = completion?.choices?.[0]?.message?.content || "";
+    if (reply) {
+      reply = `${reply}\n\n— model: ${modelUsed}`;
+    }
+    res.json({ reply, model: modelUsed });
   } catch (error) {
     console.error(error);
     const detail = error?.response?.data || error?.message || String(error);

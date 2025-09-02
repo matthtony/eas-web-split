@@ -6,14 +6,20 @@
   ],
   "functions": {
     "api/chat.js": {
-      "includeFiles": "api/kb_cache.json",
-      "maxDuration": 60,
-      "memory": 1024
+      "includeFiles": [
+        "api/*.json",
+        "public/data/raw_kb.json"
+      ],
+      "maxDuration": 120,
+      "memory": 2048
     },
     "api/chat-stream.js": {
-      "includeFiles": "api/kb_cache.json",
-      "maxDuration": 60,
-      "memory": 1024
+      "includeFiles": [
+        "api/*.json",
+        "public/data/raw_kb.json"
+      ],
+      "maxDuration": 120,
+      "memory": 2048
     },
     "api/debug-openai.js": {
       "maxDuration": 10,
