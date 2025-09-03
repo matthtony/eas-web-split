@@ -423,13 +423,13 @@ export default async function handler(req, res) {
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
     let modelSuffixSent = false;
-    let modelUsed = (await resolveReasoningModel()) || "unknown-model";
+    let modelUsed = payload.model || "unknown-model";
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       const chunkStr = decoder.decode(value);
-      // Try to capture actual model from the first chunks
-      if (modelUsed === "unknown-model") {
+      // Try to capture actual model from any chunk metadata if present
+      {
         const m = chunkStr.match(/"model"\s*:\s*"([^"]+)"/);
         if (m && m[1]) modelUsed = m[1];
       }
