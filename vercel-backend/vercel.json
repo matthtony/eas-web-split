@@ -7,11 +7,13 @@
   "functions": {
     "api/chat.js": {
       "includeFiles": "public/data/raw_kb.json",
+      "excludeFiles": "{files/**,files full/**,node_modules/pdfjs-dist/**,node_modules/pdf-parse/**}",
       "maxDuration": 120,
       "memory": 2048
     },
     "api/chat-stream.js": {
       "includeFiles": "public/data/raw_kb.json",
+      "excludeFiles": "{files/**,files full/**,node_modules/pdfjs-dist/**,node_modules/pdf-parse/**}",
       "maxDuration": 120,
       "memory": 2048
     },
