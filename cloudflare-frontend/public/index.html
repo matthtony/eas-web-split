@@ -46,12 +46,7 @@
         userInput.value = "";
         sendBtn.disabled = true;
         try {
-          // Quick diagnostic: show link to raw KB
-          const rawLink = document.createElement("div");
-          rawLink.style.fontSize = "0.85rem";
-          rawLink.style.marginBottom = "0.5rem";
-          rawLink.innerHTML = 'KB: <a href="/data/raw_kb.json" target="_blank">/data/raw_kb.json</a>';
-          chatContainer.appendChild(rawLink);
+          // Diagnostic link removed to keep bundle small for Cloudflare Pages
           const res = await fetch("/api/chat-stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
           if (res.ok && res.body) {
             const reader = res.body.getReader();
