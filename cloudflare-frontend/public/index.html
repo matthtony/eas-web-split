@@ -32,6 +32,7 @@
       const chatContainer = document.getElementById("chat-container");
       const userInput = document.getElementById("user-input");
       const sendBtn = document.getElementById("send-btn");
+      const history = [];
       function addMessage(content, type) {
         const msgEl = document.createElement("div");
         msgEl.classList.add("message", type);
@@ -43,11 +44,12 @@
         const text = userInput.value.trim();
         if (!text) return;
         addMessage(text, "user");
+        history.push({ role: "user", content: text });
         userInput.value = "";
         sendBtn.disabled = true;
         try {
           // Diagnostic link removed to keep bundle small for Cloudflare Pages
-          const res = await fetch("/api/chat-stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
+          const res = await fetch("/api/chat-stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, history }) });
           if (res.ok && res.body) {
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
@@ -85,11 +87,13 @@
                 boundary = buffer.indexOf("\n\n");
               }
             }
+            history.push({ role: "assistant", content: botMsg });
           } else {
-            const res2 = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
+            const res2 = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, history }) });
             const data = await res2.json();
             if (data.reply) {
               addMessage(data.reply.trim(), "bot");
+              history.push({ role: "assistant", content: String(data.reply || "") });
             } else {
               const detail = data?.error ? `${data.error}${data.detail ? " - " + data.detail : ""}` : "no reply";
               addMessage(`Error: ${detail}`, "bot");

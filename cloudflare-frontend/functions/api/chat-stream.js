@@ -54,7 +54,7 @@ async function loadKb(request) {
 export async function onRequestPost(context) {
 	const { request, env } = context;
 	try {
-		const { message } = await request.json();
+		const { message, history } = await request.json();
 		if (!message) return new Response("Message is required", { status: 400 });
 
 		const fallbackBase = "https://vercel-backend-3fpqg2iau-bans-projects-e190d146.vercel.app";
@@ -64,7 +64,7 @@ export async function onRequestPost(context) {
 		const upstream = await fetch(`${base}/api/chat-stream`, {
 			method: "POST",
 			headers,
-			body: JSON.stringify({ message })
+			body: JSON.stringify({ message, history })
 		});
 		return new Response(upstream.body, {
 			status: upstream.status,
