@@ -462,7 +462,7 @@ export default async function handler(req, res) {
   } else if (typeof body === "string") {
     try { body = JSON.parse(body || "{}"); } catch {}
   }
-  const { message } = body || {};
+  const { message, history } = body || {};
   if (!message) {
     return res.status(400).json({ error: "Message is required" });
   }
@@ -516,13 +516,15 @@ export default async function handler(req, res) {
       ? `-When sources are insufficient to fully answer, provide the best-effort inferred answer using clear assumptions and basic arithmetic/logic.\n-Label it as 'Best-effort inference' and prefer any partial evidence available.\n-If a numeric rule/ratio exists, scale it to the asked quantity and show steps.\n-If later documents contradict assumptions, state that the document rule should prevail.\n\n${contextText}`
       : "-No direct document evidence found. Provide a best-effort inferred answer using clear assumptions and basic arithmetic/logic. Keep it concise and label as 'Best-effort inference'. Ask for missing details if necessary.";
 
+    const historyMessages = Array.isArray(history)
+      ? history.filter((m) => m && typeof m.content === "string" && (m.role === "user" || m.role === "assistant"))
+          .map((m) => ({ role: m.role, content: String(m.content) }))
+      : [];
     const completionPayload = {
       model: "gpt-5",
       messages: [
-        {
-          role: "system",
-          content: useInference ? systemInfer : systemStrict
-        },
+        { role: "system", content: useInference ? systemInfer : systemStrict },
+        ...historyMessages,
         { role: "user", content: message }
       ]
     };
