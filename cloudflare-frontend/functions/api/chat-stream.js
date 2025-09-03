@@ -57,7 +57,7 @@ export async function onRequestPost(context) {
 		const { message } = await request.json();
 		if (!message) return new Response("Message is required", { status: 400 });
 
-		const fallbackBase = "https://vercel-backend-1o2mfgxby-bans-projects-e190d146.vercel.app";
+		const fallbackBase = "https://vercel-backend-3fpqg2iau-bans-projects-e190d146.vercel.app";
 		const base = String(env.VERCEL_API_BASE || fallbackBase).replace(/\/$/, "");
 		const headers = { "Content-Type": "application/json" };
 		if (env.VERCEL_BYPASS_TOKEN) headers["x-vercel-protection-bypass"] = String(env.VERCEL_BYPASS_TOKEN);
