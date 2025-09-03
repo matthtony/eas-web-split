@@ -416,27 +416,34 @@ export default async function handler(req, res) {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
-    // Forward raw SSE bytes from OpenAI, then append model suffix before [DONE]
+    // Forward raw SSE bytes from OpenAI, then append a standard delta chunk with model suffix before [DONE]
     if (!resp.body) throw new Error("No stream body from OpenAI");
     const reader = resp.body.getReader();
-    let modelEmitted = false;
     const encoder = new TextEncoder();
-    const modelUsed = (await resolveReasoningModel()) || "unknown-model";
+    const decoder = new TextDecoder();
+    let modelSuffixSent = false;
+    let modelUsed = (await resolveReasoningModel()) || "unknown-model";
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const chunkStr = new TextDecoder().decode(value);
-      // Intercept the [DONE] sentinel to inject our model suffix
-      if (!modelEmitted && /\n\s*data:\s*\[DONE\]/.test(chunkStr)) {
-        const suffix = encoder.encode(`data: {"model":"${modelUsed}"}\n\n`);
+      const chunkStr = decoder.decode(value);
+      // Try to capture actual model from the first chunks
+      if (modelUsed === "unknown-model") {
+        const m = chunkStr.match(/"model"\s*:\s*"([^"]+)"/);
+        if (m && m[1]) modelUsed = m[1];
+      }
+      // Before [DONE], inject our delta content so UI renders it as part of the answer
+      if (!modelSuffixSent && /\n\s*data:\s*\[DONE\]/.test(chunkStr)) {
+        const delta = { choices: [{ delta: { content: `\n\n— model: ${modelUsed}` }, index: 0, finish_reason: null }] };
+        const suffix = encoder.encode(`data: ${JSON.stringify(delta)}\n\n`);
         res.write(suffix);
-        modelEmitted = true;
+        modelSuffixSent = true;
       }
       res.write(value);
     }
-    if (!modelEmitted) {
-      const suffix = encoder.encode(`data: {"model":"${modelUsed}"}\n\n`);
-      res.write(suffix);
+    if (!modelSuffixSent) {
+      const delta = { choices: [{ delta: { content: `\n\n— model: ${modelUsed}` }, index: 0, finish_reason: null }] };
+      res.write(encoder.encode(`data: ${JSON.stringify(delta)}\n\n`));
     }
     res.end();
   } catch (error) {
