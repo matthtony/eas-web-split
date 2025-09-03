@@ -2,10 +2,7 @@ import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { createRequire } from "module";
-
-const require = createRequire(import.meta.url);
-const pdfParse = require("pdf-parse");
+// pdf-parse removed to keep bundle small; PDFs are not processed in serverless
 
 // -----------------------------------------------------------------------------
 // Config
@@ -169,7 +166,7 @@ const FILES_DIR = fs.existsSync(DEFAULT_FILES_DIR) ? DEFAULT_FILES_DIR : ALT_FIL
 // Keep a stable write target for local dev; Vercel writes may fail and are caught
 const KB_CACHE_DIR = path.join(__dirname, "..", "data");
 const KB_CACHE_FILE = path.join(KB_CACHE_DIR, "kb_cache.json");
-const SUPPORTED_EXTENSIONS = new Set([".pdf", ".txt", ".md"]);
+const SUPPORTED_EXTENSIONS = new Set([".txt", ".md"]);
 
 // -----------------------------------------------------------------------------
 // In-memory cache so that subsequent Lambda invocations reuse the KB
@@ -411,9 +408,8 @@ async function buildKnowledgeBase() {
     let text = "";
 
     if (ext === ".pdf") {
-      const pdfBuffer = fs.readFileSync(filePath);
-      const parsed = await pdfParse(pdfBuffer);
-      text = parsed.text || "";
+      // Skip PDFs in serverless functions to reduce bundle size
+      continue;
     } else {
       text = fs.readFileSync(filePath, "utf8");
     }

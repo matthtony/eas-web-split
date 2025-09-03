@@ -2,10 +2,7 @@ import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { createRequire } from "module";
-
-const require = createRequire(import.meta.url);
-const pdfParse = require("pdf-parse");
+// pdf-parse removed to keep bundle small; PDFs are not processed in serverless
 
 // Config
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -150,7 +147,7 @@ const DEFAULT_FILES_DIR = pickExistingPath(FILES_DIR_CANDIDATES) || FILES_DIR_CA
 const ALT_FILES_DIR = pickExistingPath(FILES_FULL_DIR_CANDIDATES) || FILES_FULL_DIR_CANDIDATES[0];
 const FILES_DIR = fs.existsSync(DEFAULT_FILES_DIR) ? DEFAULT_FILES_DIR : ALT_FILES_DIR;
 
-const SUPPORTED_EXTENSIONS = new Set([".pdf", ".txt", ".md"]);
+const SUPPORTED_EXTENSIONS = new Set([".txt", ".md"]);
 
 let kbChunks = null;
 let kbEmbeddings = null;
@@ -308,9 +305,8 @@ async function buildKnowledgeBase() {
     const source = path.basename(filePath);
     let text = "";
     if (ext === ".pdf") {
-      const pdfBuffer = fs.readFileSync(filePath);
-      const parsed = await pdfParse(pdfBuffer);
-      text = parsed.text || "";
+      // Skip PDFs in serverless functions to reduce bundle size
+      continue;
     } else {
       text = fs.readFileSync(filePath, "utf8");
     }
