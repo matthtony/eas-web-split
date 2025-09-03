@@ -399,7 +399,7 @@ export default async function handler(req, res) {
       : "-No direct document evidence found. Provide a best-effort inferred answer using clear assumptions and basic arithmetic/logic. Keep it concise and label as 'Best-effort inference'. Ask for missing details if necessary.";
 
     const payload = {
-      model: await resolveReasoningModel(),
+      model: "gpt-5-thinking",
       stream: true,
       messages: [
         { role: "system", content: useInference ? systemInfer : systemStrict },
@@ -409,8 +409,9 @@ export default async function handler(req, res) {
     if (REASONING_EFFORT) {
       payload.reasoning = { effort: REASONING_EFFORT };
     }
-    if (MAX_COMPLETION_TOKENS) payload.max_completion_tokens = MAX_COMPLETION_TOKENS;
-    payload.temperature = TEMPERATURE;
+    // Force requested generation settings
+    payload.max_completion_tokens = 2500;
+    payload.temperature = 0.1;
     const resp = await postChatCompletionStream(payload, { timeoutMs: 120000 });
 
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
