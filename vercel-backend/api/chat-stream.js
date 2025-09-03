@@ -399,7 +399,7 @@ export default async function handler(req, res) {
       : "-No direct document evidence found. Provide a best-effort inferred answer using clear assumptions and basic arithmetic/logic. Keep it concise and label as 'Best-effort inference'. Ask for missing details if necessary.";
 
     const payload = {
-      model: "gpt-5-thinking",
+      model: "gpt-5",
       stream: true,
       messages: [
         { role: "system", content: useInference ? systemInfer : systemStrict },

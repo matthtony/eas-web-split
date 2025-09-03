@@ -518,7 +518,7 @@ export default async function handler(req, res) {
       : "-No direct document evidence found. Provide a best-effort inferred answer using clear assumptions and basic arithmetic/logic. Keep it concise and label as 'Best-effort inference'. Ask for missing details if necessary.";
 
     const completionPayload = {
-      model: "gpt-5-thinking",
+      model: "gpt-5",
       messages: [
         {
           role: "system",
