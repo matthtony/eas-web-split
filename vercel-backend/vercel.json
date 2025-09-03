@@ -6,18 +6,12 @@
   ],
   "functions": {
     "api/chat.js": {
-      "includeFiles": [
-        "api/*.json",
-        "public/data/raw_kb.json"
-      ],
+      "includeFiles": "public/data/raw_kb.json",
       "maxDuration": 120,
       "memory": 2048
     },
     "api/chat-stream.js": {
-      "includeFiles": [
-        "api/*.json",
-        "public/data/raw_kb.json"
-      ],
+      "includeFiles": "public/data/raw_kb.json",
       "maxDuration": 120,
       "memory": 2048
     },
