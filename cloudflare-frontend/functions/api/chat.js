@@ -64,10 +64,8 @@ async function loadKb(request) {
 export async function onRequestPost(context) {
 	const { request, env } = context;
 	try {
-		if (!env.VERCEL_API_BASE) {
-			return new Response(JSON.stringify({ error: "Server not configured", detail: "VERCEL_API_BASE is missing" }), { status: 500, headers: { "Content-Type": "application/json" } });
-		}
-		const base = String(env.VERCEL_API_BASE).replace(/\/$/, "");
+		const fallbackBase = "https://vercel-backend-1o2mfgxby-bans-projects-e190d146.vercel.app";
+		const base = String(env.VERCEL_API_BASE || fallbackBase).replace(/\/$/, "");
 		const headers = { "Content-Type": "application/json" };
 		if (env.VERCEL_BYPASS_TOKEN) {
 			headers["x-vercel-protection-bypass"] = String(env.VERCEL_BYPASS_TOKEN);
