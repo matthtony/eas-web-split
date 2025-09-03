@@ -199,14 +199,13 @@ function cosineSimilarity(a, b) {
 async function generateQueryVariants(message, n = 4) {
   try {
     const resp = await postChatCompletion({
-      model: await resolveReasoningModel(),
+      model: "gpt-5",
       messages: [
         { role: "system", content: "Generate concise alternative phrasings of the user's question for retrieval. Return each variant on a new line. No numbering." },
         { role: "user", content: message }
       ],
-      temperature: TEMPERATURE,
-      max_completion_tokens: 256,
-      ...(REASONING_EFFORT ? { reasoning: { effort: REASONING_EFFORT } } : {})
+      temperature: 0.1,
+      max_completion_tokens: 256
     }, { timeoutMs: 60000 });
     const text = resp?.choices?.[0]?.message?.content || "";
     const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
